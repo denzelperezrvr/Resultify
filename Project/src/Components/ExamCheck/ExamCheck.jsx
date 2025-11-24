@@ -58,10 +58,9 @@ const ExamCheck = () => {
   const handleReviewClick = async () => {
     setLoading(true);
 
-    const token = localStorage.getItem("token");
-
-    if (token) {
-      try {
+    try {
+      const token = localStorage.getItem("token");
+      if (token) {
         const response = await fetch(
           `${process.env.REACT_APP_API_URL}/api/v1/exams/process-all`,
           {
@@ -72,17 +71,26 @@ const ExamCheck = () => {
           }
         );
 
-        const data = await response.json();
+        const text = await response.text();
+        let data;
+        try {
+          data = JSON.parse(text);
+        } catch (e) {
+          alert("Error inesperado en el backend:\n" + text);
+          setLoading(false);
+          return;
+        }
         setResults(data.results);
-        window.location.reload();
-      } catch (err) {
-        alert("Error al procesar los examenes");
-        window.location.reload();
-      } finally {
+        // Actualizar la lista de exámenes procesados después de procesar
+        fetchDetectedExams();
+        setLoading(false);
+        //window.location.reload(); // Elimina el reload para mejor UX
+      } else {
         setLoading(false);
       }
-    } else {
-      //
+    } catch (err) {
+      alert("Error al procesar los examenes");
+      setLoading(false);
     }
   };
 

@@ -177,9 +177,15 @@ router.post("/create", authenticateToken, async (req, res) => {
 
     const safeTitle = title.replace(/\s+/g, "_");
 
-    const command = `python3 "${scriptPath}" "${examId}" "${numQuestions}" "${safeTitle}"`;
+    // Usa 'python' en vez de 'python3' para compatibilidad Windows/Linux
+    const command = `python "${scriptPath}" "${examId}" "${numQuestions}" "${safeTitle}"`;
 
     exec(command, (error, stdout, stderr) => {
+      if (error) {
+        console.error("Error al generar PDF:", error, stderr);
+      } else {
+        console.log(stdout);
+      }
       // Siempre responder al cliente aunque falle la hoja
       res.status(201).json({
         message: "Exam created successfully",
@@ -212,10 +218,13 @@ router.post("/create-answer-sheet", authenticateToken, async (req, res) => {
 
     const safeTitle = title.replace(/\s+/g, "_");
 
-    const command = `python3 "${scriptPath}" "${examId}" "${numQuestions}" "${safeTitle}"`;
-
+    const command = `python "${scriptPath}" "${examId}" "${numQuestions}" "${safeTitle}"`;
     exec(command, (error, stdout, stderr) => {
-      // Siempre responder al cliente aunque falle la hoja
+      if (error) {
+        console.error("Error al generar PDF:", error, stderr);
+      } else {
+        console.log(stdout);
+      }
       res.status(201).json({
         message: "Exam created successfully",
         pdfGenerated: !error,
@@ -231,7 +240,7 @@ router.post("/grade-exams", authenticateToken, async (req, res) => {
   try {
     const { exam_id } = req.body;
 
-    const detectedExamsFolder = path.join(__dirname, "../detected_exams/");
+    const detectedExamsFolder = path.join(__dirname, "..", "..", "processing", "detected_exams");
 
     if (!fs.existsSync(detectedExamsFolder)) {
       return res
@@ -267,22 +276,26 @@ router.post("/grade-exams", authenticateToken, async (req, res) => {
     }
 
     // Mapear respuestas correctas por número de pregunta
+  // Eliminado: correctAnswersMap y scoreValueMap duplicados
+
+    // Mapear valores de score por número de pregunta
+    // CORRECCIÓN: Traer score_value en la consulta SQL
+    const questionsWithScore = await sequelize.query(
+      `SELECT q.id AS question_id, q.question_number, q.score_value, o.option_text, o.is_correct
+       FROM Questions q
+       JOIN Options o ON q.id = o.question_id
+       WHERE q.exam_id = ?
+       ORDER BY q.question_number ASC, o.id ASC`,
+      { replacements: [exam_id], type: QueryTypes.SELECT }
+    );
+
+    // Mapear respuestas correctas y score_value por número de pregunta
     const correctAnswersMap = {};
-    let questionIndex = 1;
-    for (let i = 0; i < questions.length; i++) {
-      if (questions[i].is_correct) {
-        correctAnswersMap[questionIndex] = questions[i].option_text
-          .trim()
-          .toLowerCase();
-        questionIndex++;
-      } else {
-        // Solo incrementamos el índice cuando completamos una pregunta (ultima opción revisada)
-        if (
-          i + 1 === questions.length ||
-          questions[i + 1].question_id !== questions[i].question_id
-        ) {
-          questionIndex++;
-        }
+    const scoreValueMap = {};
+    for (const q of questionsWithScore) {
+      if (q.is_correct) {
+        correctAnswersMap[q.question_number] = q.option_text.trim().toLowerCase();
+        scoreValueMap[q.question_number] = q.score_value ? Number(q.score_value) : 1;
       }
     }
 
@@ -296,6 +309,7 @@ router.post("/grade-exams", authenticateToken, async (req, res) => {
 
       let totalQuestions = detectedAnswers.length;
       let correctCount = 0;
+      let totalScore = 0;
       let details = [];
 
       for (let i = 0; i < detectedAnswers.length; i++) {
@@ -303,26 +317,36 @@ router.post("/grade-exams", authenticateToken, async (req, res) => {
         const questionNumber = parseInt(detected.question_number); // Asegurar que es número
         const userAnswer = detected.answer.trim().toLowerCase();
         const correctAnswer = correctAnswersMap[questionNumber];
+        const scoreValue = scoreValueMap[questionNumber] || 1;
 
         const isCorrect = userAnswer === correctAnswer;
 
-        if (isCorrect) correctCount++;
+        if (isCorrect) {
+          correctCount++;
+          totalScore += scoreValue;
+        }
 
         details.push({
           question_number: questionNumber,
           user_answer: userAnswer,
           correct_answer: correctAnswer,
           is_correct: isCorrect,
+          score_value: scoreValue,
         });
       }
 
-      const grade =
-        totalQuestions > 0 ? (correctCount / totalQuestions) * 100 : 0;
+      // La calificación ahora es la suma de los score_value de las preguntas correctas
+      const grade = totalScore;
 
       results.push({
         image_name: data.nombre_imagen || file,
         matricula: data.matricula?.trim() || "No detectada",
         nombre_completo: data.nombre_completo?.trim() || "No detectado",
+        grupo: (Array.isArray(data.grupo_circulos)
+          ? data.grupo_circulos.map(d => (d !== null ? d : "-")).join("")
+          : typeof data.grupo_circulos === "string"
+            ? data.grupo_circulos
+            : data.grupo?.trim() || "No detectado"),
         total_questions: totalQuestions,
         correct_answers: correctCount,
         grade: grade.toFixed(2),
@@ -377,33 +401,52 @@ router.post("/process-all", async (req, res) => {
 
       for (const image of files) {
         const imagePath = path.join(folderPath, image);
-
+        const scriptPath = path.join(__dirname, "..", "..", "processing", "review_answer_sheet.py");
+        // Forzar cwd al directorio de procesamiento
+        const processingCwd = path.join(__dirname, "..", "..", "processing");
+        const command = `"${process.env.PYTHON_PATH || 'C:\\Users\\denze\\AppData\\Local\\Programs\\Python\\Python311\\python.exe'}" "${scriptPath}" "${imagePath}"`;
+        // Log detallado antes de ejecutar
+        console.log("[PROCESS-ALL] Ejecutando comando:", command);
+        console.log("[PROCESS-ALL] cwd:", processingCwd);
         const promise = limit(
           () =>
             new Promise((resolve) => {
-              const command = `python3 ../processing/review_answer_sheet.py "${imagePath}"`;
-
-              exec(command, (error, stdout, stderr) => {
-                if (error) {
-                  return resolve({ error: true, image, folder });
-                }
-
+              exec(command, { cwd: processingCwd }, (error, stdout, stderr) => {
+                // Log de salida y error
+                console.log(`[PROCESS-ALL][${image}] STDOUT:\n`, stdout);
                 if (stderr) {
-                  //
+                  console.error(`[PROCESS-ALL][${image}] STDERR:\n`, stderr);
                 }
-
+                // Mostrar debug de grupo si existe en la salida
+                if (stdout && stdout.includes('grupo_circulos')) {
+                  const match = stdout.match(/grupo_circulos detectado: (.*)/);
+                  if (match) {
+                    console.log(`[DEBUG][${image}] grupo_circulos detectado:`, match[1]);
+                  }
+                }
+                // Verificar si el archivo JSON fue generado correctamente
+                const jsonFileName = path.basename(image, ".png") + ".json";
+                const jsonFilePath = path.join(__dirname, "..", "..", "processing", "detected_exams", jsonFileName);
+                const jsonExists = fs.existsSync(jsonFilePath);
+                if (error) {
+                  console.error("Error al ejecutar review_answer_sheet.py:", error, stderr);
+                  return resolve({ error: true, image, folder, jsonExists, stdout, stderr });
+                }
                 try {
+                  // Si el script imprime JSON, intentar parsear
                   const result = JSON.parse(stdout.trim());
                   result.folder = folder;
                   result.imageName = image;
+                  result.jsonExists = jsonExists;
                   resolve(result);
                 } catch (err) {
-                  resolve({ error: true, image, folder });
+                  // Si no es JSON, devolver salida y error
+                  console.error("Error al parsear salida de review_answer_sheet.py:", err, stdout);
+                  resolve({ error: true, image, folder, jsonExists, stdout, stderr });
                 }
               });
             })
         );
-
         processPromises.push(promise);
       }
     }
@@ -444,7 +487,7 @@ router.delete("/clear-sheets-folder", authenticateToken, (req, res) => {
 router.delete("/clear-temp-folders", authenticateToken, (req, res) => {
   try {
     const foldersToClear = [
-      path.join(__dirname, "..", "detected_exams"),
+      path.join(__dirname, "..", "..", "processing", "detected_exams"), // <-- Agregado aquí
       path.join(__dirname, "..", "uploads"),
       path.join(__dirname, "..", "..", "processing", "output_images"),
     ];
@@ -492,6 +535,28 @@ router.get("/download-answer-sheet-file/:filename", (req, res) => {
   }
 
   res.sendFile(filePath);
+});
+
+// DELETE all processed exam JSONs in detected_exams
+router.delete("/detected-exams", authenticateToken, async (req, res) => {
+  const detectedExamsDir = path.join(__dirname, "..", "..", "processing", "detected_exams");
+  try {
+    if (!fs.existsSync(detectedExamsDir)) {
+      return res.status(404).json({ ok: false, message: "Directory not found" });
+    }
+    const files = fs.readdirSync(detectedExamsDir);
+    let deletedCount = 0;
+    files.forEach((file) => {
+      const filePath = path.join(detectedExamsDir, file);
+      if (fs.lstatSync(filePath).isFile() && file.endsWith(".json")) {
+        fs.unlinkSync(filePath);
+        deletedCount++;
+      }
+    });
+    return res.json({ ok: true, deleted: deletedCount });
+  } catch (err) {
+    return res.status(500).json({ ok: false, message: "Error deleting files" });
+  }
 });
 
 module.exports = router;

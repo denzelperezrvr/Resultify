@@ -7,6 +7,7 @@ const authenticateToken = require("../middleware/authMiddleware.middleware");
 
 // Configurar multer para guardar el archivo temporalmente
 const upload = multer({ dest: "uploads/" });
+const PYTHON_PATH = "C:\\Users\\denze\\AppData\\Local\\Programs\\Python\\Python311\\python.exe";
 
 // Obtener los nombres de las imágenes en la carpeta 'output_images'
 router.get("/get-uploaded-images", authenticateToken, (req, res) => {
@@ -36,21 +37,23 @@ router.post(
     let processPromises = [];
 
     req.files.forEach((file) => {
-      const filePath = path.join(__dirname, "..", "uploads", file.filename);
-
+      // Cambia la ruta para que apunte a 'server/uploads' (no 'server/src/uploads')
+      const filePath = path.join(__dirname, "..", "..", "uploads", file.filename);
+      const scriptPath = path.join(__dirname, "..", "..", "processing", "process_pdf.py");
       // Creamos una promesa para cada procesamiento
       const promise = new Promise((resolve, reject) => {
-        // const uniqueId = Date.now();
         const uniqueId = `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
-
         exec(
-          `python3 ../processing/process_pdf.py "${filePath}" "${uniqueId}"`,
+          `"${PYTHON_PATH}" "${scriptPath}" "${filePath}" "${uniqueId}"`,
           (error, stdout, stderr) => {
             if (error) {
+              console.error("Error al procesar PDF:", error, stderr);
               reject(error);
             } else if (stderr) {
+              console.error("Stderr al procesar PDF:", stderr);
               reject(stderr);
             } else {
+              console.log("PDF procesado correctamente:", stdout);
               resolve(stdout);
             }
           }
@@ -104,7 +107,7 @@ router.get("/get-uploaded-exams", authenticateToken, (req, res) => {
 
 // obtener examenes procesados (JSON)
 router.get("/get-detected-exams", authenticateToken, (req, res) => {
-  const detectedFolder = path.join(__dirname, "..", "detected_exams");
+  const detectedFolder = path.join(__dirname, "..", "..", "processing", "detected_exams");
 
   fs.readdir(detectedFolder, (err, files) => {
     if (err) {
