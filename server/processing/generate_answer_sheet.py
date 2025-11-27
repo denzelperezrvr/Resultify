@@ -80,7 +80,7 @@ def generar_hoja_respuestas(nombre_archivo, num_preguntas=20):
     # Burbujas de preguntas
     # --- BAJAR MÁS LA SECCIÓN DE RESPUESTAS ---
     start_y = height - 2.8 * inch - 0.5 * inch  # BAJAR MEDIA PULGADA EXTRA
-    pregunta_altura = 0.4 * inch
+    pregunta_altura = 0.35 * inch  # Reducido de 0.4 para que quepan 20 preguntas
     opciones = ["A", "B", "C", "D", "E"]
     radio = 5
     padding_q = 10
