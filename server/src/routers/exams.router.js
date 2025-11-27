@@ -366,106 +366,78 @@ router.post("/grade-exams", authenticateToken, async (req, res) => {
 
 router.post("/process-all", async (req, res) => {
   try {
-    const outputImagesPath = path.join(
-      __dirname,
-      "..",
-      "..",
-      "processing",
-      "output_images"
-    );
-
-    if (!fs.existsSync(outputImagesPath)) {
-      return res
-        .status(500)
-        .send("No se encontró la carpeta de imágenes procesadas");
-    }
-
-    const folders = fs
-      .readdirSync(outputImagesPath)
-      .filter((folder) =>
-        fs.statSync(path.join(outputImagesPath, folder)).isDirectory()
-      );
-
-    if (folders.length === 0) {
-      return res.status(404).send("No se encontraron exámenes procesados");
-    }
-
-    const limit = pLimit(20); // Limita a n procesos simultáneos
-    const processPromises = [];
-
-    for (const folder of folders) {
-      const folderPath = path.join(outputImagesPath, folder);
-      const files = fs
-        .readdirSync(folderPath)
-        .filter((file) => file.endsWith(".png"));
-
-      for (const image of files) {
-        const imagePath = path.join(folderPath, image);
-        const scriptPath = path.join(__dirname, "..", "..", "processing", "review_answer_sheet.py");
-        // Forzar cwd al directorio de procesamiento
-        const processingCwd = path.join(__dirname, "..", "..", "processing");
-        const command = `"${process.env.PYTHON_PATH || 'C:\\Users\\denze\\AppData\\Local\\Programs\\Python\\Python311\\python.exe'}" "${scriptPath}" "${imagePath}"`;
-        // Log detallado antes de ejecutar
-        console.log("[PROCESS-ALL] Ejecutando comando:", command);
-        console.log("[PROCESS-ALL] cwd:", processingCwd);
-        const promise = limit(
-          () =>
-            new Promise((resolve) => {
-              exec(command, { cwd: processingCwd }, (error, stdout, stderr) => {
-                // Log de salida y error
-                console.log(`[PROCESS-ALL][${image}] STDOUT:\n`, stdout);
-                if (stderr) {
-                  console.error(`[PROCESS-ALL][${image}] STDERR:\n`, stderr);
-                }
-                // Mostrar debug de grupo si existe en la salida
-                if (stdout && stdout.includes('grupo_circulos')) {
-                  const match = stdout.match(/grupo_circulos detectado: (.*)/);
-                  if (match) {
-                    console.log(`[DEBUG][${image}] grupo_circulos detectado:`, match[1]);
-                  }
-                }
-                // Verificar si el archivo JSON fue generado correctamente
-                const jsonFileName = path.basename(image, ".png") + ".json";
-                const jsonFilePath = path.join(__dirname, "..", "..", "processing", "detected_exams", jsonFileName);
-                const jsonExists = fs.existsSync(jsonFilePath);
-                if (error) {
-                  console.error("Error al ejecutar review_answer_sheet.py:", error, stderr);
-                  return resolve({ error: true, image, folder, jsonExists, stdout, stderr });
-                }
-                try {
-                  // Si el script imprime JSON, intentar parsear
-                  const result = JSON.parse(stdout.trim());
-                  result.folder = folder;
-                  result.imageName = image;
-                  result.jsonExists = jsonExists;
-                  resolve(result);
-                } catch (err) {
-                  // Si no es JSON, devolver salida y error
-                  console.error("Error al parsear salida de review_answer_sheet.py:", err, stdout);
-                  resolve({ error: true, image, folder, jsonExists, stdout, stderr });
-                }
-              });
-            })
-        );
-        processPromises.push(promise);
+    try {
+      // Buscar PDFs en /server/uploads
+      const uploadsPath = path.join(__dirname, "..", "..", "uploads");
+      if (!fs.existsSync(uploadsPath)) {
+        return res.status(500).send("No se encontró la carpeta de uploads");
       }
+      // Allow optional list of pdf files from request body: { pdfFiles: ['a.pdf','b.pdf'] }
+      const requestedPdfFiles = (req.body && Array.isArray(req.body.pdfFiles) && req.body.pdfFiles.length > 0) ? req.body.pdfFiles.slice() : null;
+      let pdfFiles = [];
+      if (requestedPdfFiles) {
+        // Validate existence (keep order from requested list)
+        pdfFiles = requestedPdfFiles.filter((f) => fs.existsSync(path.join(uploadsPath, f)));
+      } else {
+        pdfFiles = fs.readdirSync(uploadsPath).filter((file) => file.endsWith(".pdf"));
+      }
+
+      if (pdfFiles.length === 0) {
+        return res.status(404).send("No se encontraron PDFs para procesar");
+      }
+      const limit = pLimit(10);
+      const processPromises = [];
+      for (const pdfFile of pdfFiles) {
+        const pdfPath = path.join(uploadsPath, pdfFile);
+        const pythonPath = process.env.PYTHON_PATH || 'C:\\Users\\denze\\AppData\\Local\\Programs\\Python\\Python311\\python.exe';
+        const reviewScript = path.join(__dirname, "..", "..", "processing", "review_answer_sheet.py");
+        const reviewCmd = `"${pythonPath}" "${reviewScript}" "${pdfPath}"`;
+        const reviewPromise = new Promise((resolve) => {
+          exec(reviewCmd, { cwd: path.join(__dirname, "..", "..", "processing") }, (error, stdout, stderr) => {
+            if (error) {
+              // console.error("Error al ejecutar review_answer_sheet.py:", error, stderr);
+              return resolve({ error: true, pdfFile, stdout, stderr });
+            }
+            try {
+              const parsed = JSON.parse(stdout.trim());
+              if (Array.isArray(parsed)) {
+                // Attach pdfFile to each item
+                parsed.forEach((item) => {
+                  if (item && typeof item === 'object') item.pdfFile = pdfFile;
+                });
+                resolve(parsed);
+              } else if (parsed && typeof parsed === 'object') {
+                parsed.pdfFile = pdfFile;
+                resolve(parsed);
+              } else {
+                resolve({ error: true, pdfFile, stdout, stderr });
+              }
+            } catch (err) {
+              // console.error("Error al parsear salida de review_answer_sheet.py:", err, stdout);
+              resolve({ error: true, pdfFile, stdout, stderr });
+            }
+          });
+        });
+        processPromises.push(limit(() => reviewPromise));
+      }
+      const results = await Promise.all(processPromises);
+      // Flatten results in case some entries are arrays (one PDF -> multiple pages)
+      const flatResults = results.flat();
+      const success = flatResults.filter((r) => !r.error);
+      const failed = flatResults.length - success.length;
+      res.json({
+        message: "Procesamiento terminado",
+        processed: success.length,
+        failed,
+        results: flatResults,
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
     }
-
-    const results = await Promise.all(processPromises);
-    const success = results.filter((r) => !r.error);
-    const failed = results.length - success.length;
-
-    res.json({
-      message: "Procesamiento terminado",
-      processed: success.length,
-      failed,
-      results: success,
-    });
   } catch (err) {
-    res.status(500).send("Error en el procesamiento general");
+    res.status(500).json({ error: err.message });
   }
 });
-
 // Borrar todas las hojas de respuesta
 router.delete("/clear-sheets-folder", authenticateToken, (req, res) => {
   try {
@@ -488,7 +460,7 @@ router.delete("/clear-temp-folders", authenticateToken, (req, res) => {
   try {
     const foldersToClear = [
       path.join(__dirname, "..", "..", "processing", "detected_exams"), // <-- Agregado aquí
-      path.join(__dirname, "..", "uploads"),
+      path.join(__dirname, "..", "..", "uploads"),
       path.join(__dirname, "..", "..", "processing", "output_images"),
     ];
 
@@ -519,6 +491,8 @@ router.get("/list-answer-sheets", authenticateToken, (req, res) => {
   });
 });
 
+// ...existing code...
+
 router.get("/download-answer-sheet-file/:filename", (req, res) => {
   const fileName = req.params.filename;
   const filePath = path.join(
@@ -537,26 +511,69 @@ router.get("/download-answer-sheet-file/:filename", (req, res) => {
   res.sendFile(filePath);
 });
 
-// DELETE all processed exam JSONs in detected_exams
-router.delete("/detected-exams", authenticateToken, async (req, res) => {
-  const detectedExamsDir = path.join(__dirname, "..", "..", "processing", "detected_exams");
+// POST endpoint to save exam questions loaded from Excel
+router.post("/upload-exam-excel", authenticateToken, async (req, res) => {
   try {
-    if (!fs.existsSync(detectedExamsDir)) {
-      return res.status(404).json({ ok: false, message: "Directory not found" });
+    const { exam_id, questions } = req.body;
+
+    if (!exam_id || !Array.isArray(questions) || questions.length === 0) {
+      return res.status(400).json({
+        ok: false,
+        message: "exam_id y questions requeridos",
+      });
     }
-    const files = fs.readdirSync(detectedExamsDir);
-    let deletedCount = 0;
-    files.forEach((file) => {
-      const filePath = path.join(detectedExamsDir, file);
-      if (fs.lstatSync(filePath).isFile() && file.endsWith(".json")) {
-        fs.unlinkSync(filePath);
-        deletedCount++;
+
+    // Verificar que el examen existe
+    const exam = await Exams.findByPk(exam_id);
+    if (!exam) {
+      return res.status(404).json({
+        ok: false,
+        message: "Examen no encontrado",
+      });
+    }
+
+    // Procesar cada pregunta
+    const savedQuestions = [];
+    for (const q of questions) {
+      if (!q.text || !q.score || !q.answers || q.answers.length === 0) {
+        continue; // Saltar preguntas incompletas
       }
+
+      // Crear pregunta
+      const question = await Questions.create({
+        exam_id,
+        question_number: q.number || savedQuestions.length + 1,
+        question_text: q.text,
+        score_value: parseFloat(q.score) || 0,
+      });
+
+      // Crear respuesta correcta
+      for (const answer of q.answers) {
+        if (answer.text) {
+          await Options.create({
+            question_id: question.id,
+            option_text: answer.text,
+            is_correct: answer.isCorrect ? 1 : 0,
+          });
+        }
+      }
+
+      savedQuestions.push(question.id);
+    }
+
+    return res.json({
+      ok: true,
+      message: `${savedQuestions.length} preguntas guardadas correctamente`,
+      questionIds: savedQuestions,
     });
-    return res.json({ ok: true, deleted: deletedCount });
   } catch (err) {
-    return res.status(500).json({ ok: false, message: "Error deleting files" });
+    return res.status(500).json({
+      ok: false,
+      message: "Error al guardar preguntas: " + err.message,
+    });
   }
 });
 
 module.exports = router;
+
+

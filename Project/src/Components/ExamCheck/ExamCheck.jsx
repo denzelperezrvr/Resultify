@@ -16,6 +16,7 @@ const ExamCheck = () => {
   const [loading, setLoading] = useState(false);
   const [results, setResults] = useState(null);
   const [gradedResults, setGradedResults] = useState(null);
+  const [selectedUploadedFiles, setSelectedUploadedFiles] = useState([]);
 
   const handleGradeExams = async () => {
     if (!selectedExam) {
@@ -61,13 +62,16 @@ const ExamCheck = () => {
     try {
       const token = localStorage.getItem("token");
       if (token) {
+        const body = selectedUploadedFiles && selectedUploadedFiles.length > 0 ? { pdfFiles: selectedUploadedFiles } : {};
         const response = await fetch(
           `${process.env.REACT_APP_API_URL}/api/v1/exams/process-all`,
           {
             method: "POST",
             headers: {
+              "Content-Type": "application/json",
               Authorization: `Bearer ${token}`,
             },
+            body: JSON.stringify(body),
           }
         );
 
@@ -83,6 +87,8 @@ const ExamCheck = () => {
         setResults(data.results);
         // Actualizar la lista de exámenes procesados después de procesar
         fetchDetectedExams();
+        // Refrescar la lista de uploaded PDFs (algunos pueden haber sido borrados)
+        fetchExams();
         setLoading(false);
         //window.location.reload(); // Elimina el reload para mejor UX
       } else {
@@ -239,6 +245,37 @@ const ExamCheck = () => {
     }
   };
 
+  // Handler para subir PDFs
+  const handleUploadPDFs = async (files) => {
+    setLoading(true);
+    const token = localStorage.getItem("token");
+    const formData = new FormData();
+    for (let i = 0; i < files.length; i++) {
+      formData.append("files", files[i]);
+    }
+    try {
+      const response = await fetch(
+        `${process.env.REACT_APP_API_URL}/api/v1/uploads/upload`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+          body: formData,
+        }
+      );
+      if (!response.ok) {
+        throw new Error("Error al subir los archivos PDF");
+      }
+      alert("PDFs subidos correctamente");
+      fetchExams(); // Actualiza la lista
+    } catch (err) {
+      alert("Error al subir los archivos PDF");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <div>
       <SideBar />
@@ -255,7 +292,7 @@ const ExamCheck = () => {
 
       <div className="exam-check-content">
         <div className="exam-check-left-content">
-          <UploadedExamsList exams={exams} loading={loading} />
+          <UploadedExamsList exams={exams} loading={loading} onUpload={handleUploadPDFs} onSelectionChange={setSelectedUploadedFiles} />
         </div>
 
         <div className="exam-check-medium-content">
@@ -286,18 +323,6 @@ const ExamCheck = () => {
           >
             {loading ? "Revisando..." : "Revisar exámenes"}
           </button>
-
-          {results && (
-            <div>
-              <h2>Resultados:</h2>
-              {results.map((result, index) => (
-                <div key={index}>
-                  <h3>Examen de {result.folder}:</h3>{" "}
-                  <pre>{JSON.stringify(result, null, 2)}</pre>
-                </div>
-              ))}
-            </div>
-          )}
 
           {gradedResults && <ExamResults results={gradedResults} />}
         </div>

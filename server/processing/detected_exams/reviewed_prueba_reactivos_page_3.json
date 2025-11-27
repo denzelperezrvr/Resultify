@@ -1,0 +1,44 @@
+{
+    "nombre": "No detectado",
+    "matricula": "1921578",
+    "grupo": "051",
+    "preguntas_detectadas": [
+        {
+            "question_number": 1,
+            "answer": "A"
+        },
+        {
+            "question_number": 2,
+            "answer": "A"
+        },
+        {
+            "question_number": 3,
+            "answer": "D"
+        },
+        {
+            "question_number": 4,
+            "answer": "C"
+        },
+        {
+            "question_number": 5,
+            "answer": "B"
+        }
+    ],
+    "matricula_circulos": [
+        1,
+        9,
+        2,
+        1,
+        5,
+        7,
+        8
+    ],
+    "grupo_circulos": [
+        0,
+        5,
+        1
+    ],
+    "imagen_procesada": "C:\\Users\\denze\\OneDrive\\Documentos\\GitHub\\Resultify\\server\\processing\\__temp_review_img__page_3.png",
+    "pdfFile": "prueba_reactivos.pdf",
+    "page": 3
+}

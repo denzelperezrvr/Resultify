@@ -4,6 +4,7 @@ import { useState, useEffect } from "react";
 import { jwtDecode } from "jwt-decode";
 import { useNavigate } from "react-router-dom";
 import useAuthCheck from "../../hooks/useAuthCheck";
+import * as XLSX from "xlsx";
 import "./NewExam.css";
 
 const NewExam = () => {
@@ -19,6 +20,70 @@ const NewExam = () => {
   });
 
   const [questions, setQuestions] = useState([]);
+  const [excelLoading, setExcelLoading] = useState(false);
+
+  const handleDownloadTemplate = () => {
+    // Crear datos de ejemplo para el template
+    const templateData = [
+      { pregunta: "¿Cuál es la capital de España?", respuesta_correcta: "Madrid", valor: 5 },
+      { pregunta: "¿Cuál es el planeta más grande del sistema solar?", respuesta_correcta: "Júpiter", valor: 5 },
+      { pregunta: "¿En qué año se descubrió América?", respuesta_correcta: "1492", valor: 5 },
+      { pregunta: "Escribe tu pregunta aquí", respuesta_correcta: "Escribe la respuesta correcta", valor: 5 },
+    ];
+
+    // Crear workbook y worksheet
+    const worksheet = XLSX.utils.json_to_sheet(templateData);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Preguntas");
+
+    // Ajustar ancho de columnas
+    worksheet["!cols"] = [{ wch: 40 }, { wch: 30 }, { wch: 10 }];
+
+    // Descargar archivo
+    XLSX.writeFile(workbook, "template_examen.xlsx");
+  };
+
+  const handleExcelUpload = async (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    try {
+      setExcelLoading(true);
+      const data = await file.arrayBuffer();
+      const workbook = XLSX.read(data);
+      const worksheet = workbook.Sheets[workbook.SheetNames[0]];
+      const jsonData = XLSX.utils.sheet_to_json(worksheet);
+
+      // Mapear Excel a estructura de preguntas
+      const loadedQuestions = jsonData.map((row, index) => ({
+        id: Date.now() + index,
+        number: index + 1,
+        text: row.pregunta || "",
+        score: row.valor || 0,
+        answers: [
+          {
+            id: Date.now() + index + 1000,
+            text: row.respuesta_correcta || "",
+            isCorrect: true,
+          },
+        ],
+        maxAnswers: 1,
+      }));
+
+      setQuestions(loadedQuestions);
+      setExamData((prevData) => ({
+        ...prevData,
+        questions: loadedQuestions,
+      }));
+      alert(`Se cargaron ${loadedQuestions.length} preguntas correctamente`);
+    } catch (error) {
+      alert("Error al procesar el archivo Excel: " + error.message);
+    } finally {
+      setExcelLoading(false);
+      event.target.value = "";
+    }
+  };
+
   const addQuestion = () => {
     const newQuestions = [
       ...questions,
@@ -220,6 +285,26 @@ const NewExam = () => {
         <button onClick={handleClear} type="button">
           Limpiar
         </button>
+        <div className="excel-upload-section">
+          <button
+            type="button"
+            onClick={handleDownloadTemplate}
+            className="excel-download-label"
+          >
+            ⬇️ Descargar Template
+          </button>
+          <label htmlFor="excel-input" className="excel-label">
+            📊 Cargar desde Excel
+          </label>
+          <input
+            id="excel-input"
+            type="file"
+            accept=".xlsx,.xls,.csv"
+            onChange={handleExcelUpload}
+            disabled={excelLoading}
+            style={{ display: "none" }}
+          />
+        </div>
       </div>
       <form ref={formRef} onSubmit={handleSubmit} action="">
         <div className="exam-container">

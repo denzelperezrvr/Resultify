@@ -118,11 +118,19 @@ def generar_hoja_respuestas(nombre_archivo, num_preguntas=20):
 # El código para ejecutar desde la terminal se mantiene igual
 if __name__ == "__main__":
     if len(sys.argv) < 3:
-        print("Uso: python tu_script.py <nombre_archivo> <num_preguntas>")
+        print("Uso: python tu_script.py <exam_id> <num_preguntas> <safe_title>")
         sys.exit(1)
     
-    nombre_archivo = sys.argv[1]
+    exam_id = sys.argv[1]
     num_preguntas = int(sys.argv[2])
+    safe_title = sys.argv[3] if len(sys.argv) > 3 else "exam"
     
-    # Ejemplo de cómo llamar a la función directamente para pruebas:
-    generar_hoja_respuestas(f"{nombre_archivo}.pdf", num_preguntas)
+    # Crear carpeta de PDFs generados si no existe
+    generated_pdfs_dir = os.path.join(os.path.dirname(__file__), "generated_pdfs")
+    os.makedirs(generated_pdfs_dir, exist_ok=True)
+    
+    # Crear nombre de archivo con exam_id y title
+    nombre_archivo = os.path.join(generated_pdfs_dir, f"answer_sheet_{exam_id}_{safe_title}.pdf")
+    
+    # Generar la hoja de respuestas
+    generar_hoja_respuestas(nombre_archivo, num_preguntas)
