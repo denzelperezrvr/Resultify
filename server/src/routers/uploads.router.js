@@ -7,6 +7,7 @@ const authenticateToken = require("../middleware/authMiddleware.middleware");
 
 // Configurar multer para guardar el archivo temporalmente
 const upload = multer({ dest: "uploads/" });
+const PYTHON_PATH = "C:\\Users\\denze\\AppData\\Local\\Programs\\Python\\Python311\\python.exe";
 
 // Obtener los nombres de las imágenes en la carpeta 'output_images'
 router.get("/get-uploaded-images", authenticateToken, (req, res) => {
@@ -23,6 +24,32 @@ router.get("/get-uploaded-images", authenticateToken, (req, res) => {
   }
 });
 
+// Obtener los nombres de los exámenes subidos en la carpeta 'uploads'
+router.get("/get-uploaded-exams", authenticateToken, (req, res) => {
+  const uploadsFolder = path.join(__dirname, "..", "..", "uploads");
+  fs.readdir(uploadsFolder, (err, files) => {
+    if (err) {
+      return res.status(500).json({ error: "Error al leer los exámenes subidos" });
+    }
+    // Filtrar solo archivos PDF
+    const pdfs = files.filter((file) => file.toLowerCase().endsWith(".pdf"));
+    res.json(pdfs);
+  });
+});
+
+// Obtener los nombres de los exámenes procesados en la carpeta 'detected_exams'
+router.get("/get-detected-exams", authenticateToken, (req, res) => {
+  const detectedFolder = path.join(__dirname, "..", "..", "processing", "detected_exams");
+  fs.readdir(detectedFolder, (err, files) => {
+    if (err) {
+      return res.status(500).json({ error: "Error al leer los exámenes procesados" });
+    }
+    // Filtrar solo archivos JSON
+    const detectedExams = files.filter((file) => file.toLowerCase().endsWith(".json"));
+    res.json(detectedExams);
+  });
+});
+
 // cargar archivos
 router.post(
   "/upload",
@@ -32,92 +59,21 @@ router.post(
     if (!req.files || req.files.length === 0) {
       return res.status(400).send("No se subió ningún archivo");
     }
-
-    let processPromises = [];
-
-    req.files.forEach((file) => {
-      const filePath = path.join(__dirname, "..", "uploads", file.filename);
-
-      // Creamos una promesa para cada procesamiento
-      const promise = new Promise((resolve, reject) => {
-        // const uniqueId = Date.now();
-        const uniqueId = `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
-
-        exec(
-          `python3 ../processing/process_pdf.py "${filePath}" "${uniqueId}"`,
-          (error, stdout, stderr) => {
-            if (error) {
-              reject(error);
-            } else if (stderr) {
-              reject(stderr);
-            } else {
-              resolve(stdout);
-            }
-          }
-        );
+    try {
+      req.files.forEach((file) => {
+        // Asegura que el archivo tenga extensión .pdf y nombre original
+        let originalName = file.originalname;
+        if (!originalName.toLowerCase().endsWith('.pdf')) {
+          originalName += '.pdf';
+        }
+        const oldPath = path.join(__dirname, "..", "..", "uploads", file.filename);
+        const newPath = path.join(__dirname, "..", "..", "uploads", originalName);
+        fs.renameSync(oldPath, newPath);
       });
-
-      processPromises.push(promise);
-    });
-
-    // Esperamos a que todos los archivos se procesen
-    Promise.allSettled(processPromises)
-      .then((results) => {
-        res.json({
-          message: "Todos los archivos han sido procesados",
-          results: results.map((r) =>
-            r.status === "fulfilled" ? r.value : `Error: ${r.reason}`
-          ),
-        });
-      })
-      .catch((err) => {
-        res.status(500).send("Error en el procesamiento");
-      });
+      res.json({ message: "Archivos PDF subidos correctamente" });
+    } catch (err) {
+      res.status(500).json({ error: "Error al guardar los archivos PDF" });
+    }
   }
 );
-
-// Obtener examenes procesados (PNG)
-router.get("/get-uploaded-exams", authenticateToken, (req, res) => {
-  const outputFolder = path.join(
-    __dirname,
-    "..",
-    "..",
-    "processing",
-    "output_images"
-  );
-
-  fs.readdir(outputFolder, { withFileTypes: true }, (err, files) => {
-    if (err) {
-      return res
-        .status(500)
-        .json({ error: "Error al leer los examenes procesados" });
-    }
-
-    // filtrar solo carpetas (cada carpeta es un examen)
-    const examFolders = files
-      .filter((file) => file.isDirectory())
-      .map((folder) => folder.name);
-
-    res.json(examFolders);
-  });
-});
-
-// obtener examenes procesados (JSON)
-router.get("/get-detected-exams", authenticateToken, (req, res) => {
-  const detectedFolder = path.join(__dirname, "..", "detected_exams");
-
-  fs.readdir(detectedFolder, (err, files) => {
-    if (err) {
-      return res
-        .status(500)
-        .json({ error: "Error al leer los examenes detectados" });
-    }
-
-    // Filtrar solo archivos que sean JSON
-    const detectedExams = files.filter((file) => file.endsWith(".json"));
-
-    res.json(detectedExams);
-  });
-});
-
 module.exports = router;

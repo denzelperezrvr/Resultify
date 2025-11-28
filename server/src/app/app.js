@@ -29,11 +29,12 @@ app.use("/api/v1/exams", examsRouter);
 app.use("/api/v1/uploads", uploadsRouter);
 app.use("/api/v1/submissions", submissionsRouter);
 
-app.use((err, res) => {
+app.use((err, req, res, next) => {
   res.status(500).json({
     ok: false,
     message: "Ocurrió un error en el servidor",
-    error: err,
+    error: err && err.message ? err.message : String(err),
+    stack: err && err.stack ? err.stack : undefined,
   });
 });
 

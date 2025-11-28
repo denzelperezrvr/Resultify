@@ -177,9 +177,15 @@ router.post("/create", authenticateToken, async (req, res) => {
 
     const safeTitle = title.replace(/\s+/g, "_");
 
-    const command = `python3 "${scriptPath}" "${examId}" "${numQuestions}" "${safeTitle}"`;
+    // Usa 'python' en vez de 'python3' para compatibilidad Windows/Linux
+    const command = `python "${scriptPath}" "${examId}" "${numQuestions}" "${safeTitle}"`;
 
     exec(command, (error, stdout, stderr) => {
+      if (error) {
+        console.error("Error al generar PDF:", error, stderr);
+      } else {
+        console.log(stdout);
+      }
       // Siempre responder al cliente aunque falle la hoja
       res.status(201).json({
         message: "Exam created successfully",
@@ -212,10 +218,13 @@ router.post("/create-answer-sheet", authenticateToken, async (req, res) => {
 
     const safeTitle = title.replace(/\s+/g, "_");
 
-    const command = `python3 "${scriptPath}" "${examId}" "${numQuestions}" "${safeTitle}"`;
-
+    const command = `python "${scriptPath}" "${examId}" "${numQuestions}" "${safeTitle}"`;
     exec(command, (error, stdout, stderr) => {
-      // Siempre responder al cliente aunque falle la hoja
+      if (error) {
+        console.error("Error al generar PDF:", error, stderr);
+      } else {
+        console.log(stdout);
+      }
       res.status(201).json({
         message: "Exam created successfully",
         pdfGenerated: !error,
@@ -231,7 +240,7 @@ router.post("/grade-exams", authenticateToken, async (req, res) => {
   try {
     const { exam_id } = req.body;
 
-    const detectedExamsFolder = path.join(__dirname, "../detected_exams/");
+    const detectedExamsFolder = path.join(__dirname, "..", "..", "processing", "detected_exams");
 
     if (!fs.existsSync(detectedExamsFolder)) {
       return res
@@ -267,22 +276,26 @@ router.post("/grade-exams", authenticateToken, async (req, res) => {
     }
 
     // Mapear respuestas correctas por número de pregunta
+  // Eliminado: correctAnswersMap y scoreValueMap duplicados
+
+    // Mapear valores de score por número de pregunta
+    // CORRECCIÓN: Traer score_value en la consulta SQL
+    const questionsWithScore = await sequelize.query(
+      `SELECT q.id AS question_id, q.question_number, q.score_value, o.option_text, o.is_correct
+       FROM Questions q
+       JOIN Options o ON q.id = o.question_id
+       WHERE q.exam_id = ?
+       ORDER BY q.question_number ASC, o.id ASC`,
+      { replacements: [exam_id], type: QueryTypes.SELECT }
+    );
+
+    // Mapear respuestas correctas y score_value por número de pregunta
     const correctAnswersMap = {};
-    let questionIndex = 1;
-    for (let i = 0; i < questions.length; i++) {
-      if (questions[i].is_correct) {
-        correctAnswersMap[questionIndex] = questions[i].option_text
-          .trim()
-          .toLowerCase();
-        questionIndex++;
-      } else {
-        // Solo incrementamos el índice cuando completamos una pregunta (ultima opción revisada)
-        if (
-          i + 1 === questions.length ||
-          questions[i + 1].question_id !== questions[i].question_id
-        ) {
-          questionIndex++;
-        }
+    const scoreValueMap = {};
+    for (const q of questionsWithScore) {
+      if (q.is_correct) {
+        correctAnswersMap[q.question_number] = q.option_text.trim().toLowerCase();
+        scoreValueMap[q.question_number] = q.score_value ? Number(q.score_value) : 1;
       }
     }
 
@@ -296,6 +309,7 @@ router.post("/grade-exams", authenticateToken, async (req, res) => {
 
       let totalQuestions = detectedAnswers.length;
       let correctCount = 0;
+      let totalScore = 0;
       let details = [];
 
       for (let i = 0; i < detectedAnswers.length; i++) {
@@ -303,26 +317,36 @@ router.post("/grade-exams", authenticateToken, async (req, res) => {
         const questionNumber = parseInt(detected.question_number); // Asegurar que es número
         const userAnswer = detected.answer.trim().toLowerCase();
         const correctAnswer = correctAnswersMap[questionNumber];
+        const scoreValue = scoreValueMap[questionNumber] || 1;
 
         const isCorrect = userAnswer === correctAnswer;
 
-        if (isCorrect) correctCount++;
+        if (isCorrect) {
+          correctCount++;
+          totalScore += scoreValue;
+        }
 
         details.push({
           question_number: questionNumber,
           user_answer: userAnswer,
           correct_answer: correctAnswer,
           is_correct: isCorrect,
+          score_value: scoreValue,
         });
       }
 
-      const grade =
-        totalQuestions > 0 ? (correctCount / totalQuestions) * 100 : 0;
+      // La calificación ahora es la suma de los score_value de las preguntas correctas
+      const grade = totalScore;
 
       results.push({
         image_name: data.nombre_imagen || file,
         matricula: data.matricula?.trim() || "No detectada",
         nombre_completo: data.nombre_completo?.trim() || "No detectado",
+        grupo: (Array.isArray(data.grupo_circulos)
+          ? data.grupo_circulos.map(d => (d !== null ? d : "-")).join("")
+          : typeof data.grupo_circulos === "string"
+            ? data.grupo_circulos
+            : data.grupo?.trim() || "No detectado"),
         total_questions: totalQuestions,
         correct_answers: correctCount,
         grade: grade.toFixed(2),
@@ -342,87 +366,78 @@ router.post("/grade-exams", authenticateToken, async (req, res) => {
 
 router.post("/process-all", async (req, res) => {
   try {
-    const outputImagesPath = path.join(
-      __dirname,
-      "..",
-      "..",
-      "processing",
-      "output_images"
-    );
-
-    if (!fs.existsSync(outputImagesPath)) {
-      return res
-        .status(500)
-        .send("No se encontró la carpeta de imágenes procesadas");
-    }
-
-    const folders = fs
-      .readdirSync(outputImagesPath)
-      .filter((folder) =>
-        fs.statSync(path.join(outputImagesPath, folder)).isDirectory()
-      );
-
-    if (folders.length === 0) {
-      return res.status(404).send("No se encontraron exámenes procesados");
-    }
-
-    const limit = pLimit(20); // Limita a n procesos simultáneos
-    const processPromises = [];
-
-    for (const folder of folders) {
-      const folderPath = path.join(outputImagesPath, folder);
-      const files = fs
-        .readdirSync(folderPath)
-        .filter((file) => file.endsWith(".png"));
-
-      for (const image of files) {
-        const imagePath = path.join(folderPath, image);
-
-        const promise = limit(
-          () =>
-            new Promise((resolve) => {
-              const command = `python3 ../processing/review_answer_sheet.py "${imagePath}"`;
-
-              exec(command, (error, stdout, stderr) => {
-                if (error) {
-                  return resolve({ error: true, image, folder });
-                }
-
-                if (stderr) {
-                  //
-                }
-
-                try {
-                  const result = JSON.parse(stdout.trim());
-                  result.folder = folder;
-                  result.imageName = image;
-                  resolve(result);
-                } catch (err) {
-                  resolve({ error: true, image, folder });
-                }
-              });
-            })
-        );
-
-        processPromises.push(promise);
+    try {
+      // Buscar PDFs en /server/uploads
+      const uploadsPath = path.join(__dirname, "..", "..", "uploads");
+      if (!fs.existsSync(uploadsPath)) {
+        return res.status(500).send("No se encontró la carpeta de uploads");
       }
+      // Allow optional list of pdf files from request body: { pdfFiles: ['a.pdf','b.pdf'] }
+      const requestedPdfFiles = (req.body && Array.isArray(req.body.pdfFiles) && req.body.pdfFiles.length > 0) ? req.body.pdfFiles.slice() : null;
+      let pdfFiles = [];
+      if (requestedPdfFiles) {
+        // Validate existence (keep order from requested list)
+        pdfFiles = requestedPdfFiles.filter((f) => fs.existsSync(path.join(uploadsPath, f)));
+      } else {
+        pdfFiles = fs.readdirSync(uploadsPath).filter((file) => file.endsWith(".pdf"));
+      }
+
+      if (pdfFiles.length === 0) {
+        return res.status(404).send("No se encontraron PDFs para procesar");
+      }
+      const limit = pLimit(10);
+      const processPromises = [];
+      for (const pdfFile of pdfFiles) {
+        const pdfPath = path.join(uploadsPath, pdfFile);
+        const pythonPath = process.env.PYTHON_PATH || 'C:\\Users\\denze\\AppData\\Local\\Programs\\Python\\Python311\\python.exe';
+        const reviewScript = path.join(__dirname, "..", "..", "processing", "review_answer_sheet.py");
+        const reviewCmd = `"${pythonPath}" "${reviewScript}" "${pdfPath}"`;
+        const reviewPromise = new Promise((resolve) => {
+          exec(reviewCmd, { cwd: path.join(__dirname, "..", "..", "processing") }, (error, stdout, stderr) => {
+            if (error) {
+              // console.error("Error al ejecutar review_answer_sheet.py:", error, stderr);
+              return resolve({ error: true, pdfFile, stdout, stderr });
+            }
+            try {
+              const parsed = JSON.parse(stdout.trim());
+              if (Array.isArray(parsed)) {
+                // Attach pdfFile to each item
+                parsed.forEach((item) => {
+                  if (item && typeof item === 'object') item.pdfFile = pdfFile;
+                });
+                resolve(parsed);
+              } else if (parsed && typeof parsed === 'object') {
+                parsed.pdfFile = pdfFile;
+                resolve(parsed);
+              } else {
+                resolve({ error: true, pdfFile, stdout, stderr });
+              }
+            } catch (err) {
+              // console.error("Error al parsear salida de review_answer_sheet.py:", err, stdout);
+              resolve({ error: true, pdfFile, stdout, stderr });
+            }
+          });
+        });
+        processPromises.push(limit(() => reviewPromise));
+      }
+      const results = await Promise.all(processPromises);
+      // Flatten results in case some entries are arrays (one PDF -> multiple pages)
+      const flatResults = results.flat();
+      const success = flatResults.filter((r) => !r.error);
+      const failed = flatResults.length - success.length;
+      res.json({
+        message: "Procesamiento terminado",
+        processed: success.length,
+        failed,
+        results: flatResults,
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
     }
-
-    const results = await Promise.all(processPromises);
-    const success = results.filter((r) => !r.error);
-    const failed = results.length - success.length;
-
-    res.json({
-      message: "Procesamiento terminado",
-      processed: success.length,
-      failed,
-      results: success,
-    });
   } catch (err) {
-    res.status(500).send("Error en el procesamiento general");
+    res.status(500).json({ error: err.message });
   }
 });
-
 // Borrar todas las hojas de respuesta
 router.delete("/clear-sheets-folder", authenticateToken, (req, res) => {
   try {
@@ -444,8 +459,8 @@ router.delete("/clear-sheets-folder", authenticateToken, (req, res) => {
 router.delete("/clear-temp-folders", authenticateToken, (req, res) => {
   try {
     const foldersToClear = [
-      path.join(__dirname, "..", "detected_exams"),
-      path.join(__dirname, "..", "uploads"),
+      path.join(__dirname, "..", "..", "processing", "detected_exams"), // <-- Agregado aquí
+      path.join(__dirname, "..", "..", "uploads"),
       path.join(__dirname, "..", "..", "processing", "output_images"),
     ];
 
@@ -476,6 +491,8 @@ router.get("/list-answer-sheets", authenticateToken, (req, res) => {
   });
 });
 
+// ...existing code...
+
 router.get("/download-answer-sheet-file/:filename", (req, res) => {
   const fileName = req.params.filename;
   const filePath = path.join(
@@ -494,4 +511,69 @@ router.get("/download-answer-sheet-file/:filename", (req, res) => {
   res.sendFile(filePath);
 });
 
+// POST endpoint to save exam questions loaded from Excel
+router.post("/upload-exam-excel", authenticateToken, async (req, res) => {
+  try {
+    const { exam_id, questions } = req.body;
+
+    if (!exam_id || !Array.isArray(questions) || questions.length === 0) {
+      return res.status(400).json({
+        ok: false,
+        message: "exam_id y questions requeridos",
+      });
+    }
+
+    // Verificar que el examen existe
+    const exam = await Exams.findByPk(exam_id);
+    if (!exam) {
+      return res.status(404).json({
+        ok: false,
+        message: "Examen no encontrado",
+      });
+    }
+
+    // Procesar cada pregunta
+    const savedQuestions = [];
+    for (const q of questions) {
+      if (!q.text || !q.score || !q.answers || q.answers.length === 0) {
+        continue; // Saltar preguntas incompletas
+      }
+
+      // Crear pregunta
+      const question = await Questions.create({
+        exam_id,
+        question_number: q.number || savedQuestions.length + 1,
+        question_text: q.text,
+        score_value: parseFloat(q.score) || 0,
+      });
+
+      // Crear respuesta correcta
+      for (const answer of q.answers) {
+        if (answer.text) {
+          await Options.create({
+            question_id: question.id,
+            option_text: answer.text,
+            is_correct: answer.isCorrect ? 1 : 0,
+          });
+        }
+      }
+
+      savedQuestions.push(question.id);
+    }
+
+    return res.json({
+      ok: true,
+      message: `${savedQuestions.length} preguntas guardadas correctamente`,
+      questionIds: savedQuestions,
+    });
+  } catch (err) {
+    return res.status(500).json({
+      ok: false,
+      message: "Error al guardar preguntas: " + err.message,
+    });
+  }
+});
+
 module.exports = router;
+
+
